@@ -1,0 +1,5 @@
+data/*
+results/*
+*.nc
+models/*/data
+models/*/results
