@@ -4,6 +4,19 @@
 
 mkdir -p {data,models,results}
 
+
+# --
+# Installation
+
+conda create -n rec_env python==3.6 pip -y
+source activate rec_env
+
+pip install implicit
+pip install lightfm
+conda install -c maciejkula -c pytorch spotlight=0.1.5 -y
+# Also need to install `https://github.com/quora/qmf`
+# Also need to install `https://github.com/bkj/basenet`
+
 # --
 # IO
 
