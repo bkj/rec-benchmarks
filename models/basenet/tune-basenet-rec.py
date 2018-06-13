@@ -23,6 +23,8 @@ from basenet.text.data import SortishSampler
 
 from torch.utils.data import Dataset, DataLoader
 
+import dlib
+
 # --
 # Helpers
 
@@ -62,12 +64,12 @@ class DestinyModel(BaseNet):
         
         self.emb = nn.Embedding(n_toks, emb_dim, padding_idx=0)
         
-        self.dropout = dropout
-        
         self.emb_bias   = nn.Parameter(torch.zeros(emb_dim))
         self.bn1        = nn.BatchNorm1d(emb_dim)
+        self.dropout1   = nn.Dropout(p=dropout)
         self.hidden     = nn.Linear(emb_dim, emb_dim)
         self.bn2        = nn.BatchNorm1d(emb_dim)
+        self.dropout2   = nn.Dropout(p=dropout)
         self.classifier = nn.Linear(emb_dim, n_toks)
         
         torch.nn.init.normal_(self.emb.weight.data, 0, 0.01)
@@ -83,11 +85,11 @@ class DestinyModel(BaseNet):
     def forward(self, x):
         x = self.emb(x).sum(dim=1) + self.emb_bias
         x = self.bn1(F.relu(x))
-        x = F.dropout(x, p=self.dropout, training=self.training)
+        x = self.dropout1(x)
         
         x = self.hidden(x)
         x = self.bn2(F.relu(x))
-        x = F.dropout(x, p=self.dropout, training=self.training)
+        x = self.dropout2(x)
         
         x = self.classifier(x)
         return x
@@ -105,20 +107,94 @@ def parse_args():
     parser.add_argument('--train-path', type=str, default='../../data/edgelist-train.tsv')
     parser.add_argument('--test-path', type=str, default='../../data/edgelist-test.tsv')
     
-    parser.add_argument('--epochs', type=int, default=10)
-    parser.add_argument('--batch-size', type=int, default=256)
-    parser.add_argument('--lr', type=float, default=0.01)
-    parser.add_argument('--bias-offset', type=float, default=-10)
-    
-    parser.add_argument('--emb-dim', type=int, default=800)
-    parser.add_argument('--dropout', type=float, default=0.5)
-    
     parser.add_argument('--use-cache', action="store_true")
     parser.add_argument('--eval-interval', type=int, default=1)
     parser.add_argument('--no-verbose', action="store_true")
     parser.add_argument('--seed', type=int, default=456)
     
     return parser.parse_args()
+
+
+def run_one(batch_size, emb_dim, dropout, bias_offset, lr, lr_type):
+    epochs = 6
+    lr = 10 ** lr
+    
+    dataloaders = {
+        "train" : DataLoader(
+            dataset=RaggedAutoencoderDataset(X=X_train, n_toks=n_toks),
+            batch_size=int(batch_size),
+            collate_fn=pad_collate_fn,
+            num_workers=2,
+            pin_memory=True,
+            shuffle=True,
+            drop_last=True,
+        ),
+        "valid" : DataLoader(
+            dataset=RaggedAutoencoderDataset(X=X_train, n_toks=n_toks),
+            batch_size=int(batch_size),
+            collate_fn=pad_collate_fn,
+            num_workers=2,
+            pin_memory=True,
+            shuffle=False,
+            drop_last=False,
+        )
+    }
+    
+    destiny_params = {
+        "emb_dim"     : int(emb_dim),
+        "dropout"     : dropout,
+        "bias_offset" : bias_offset,
+    }
+    
+    model = DestinyModel(n_toks=n_toks, **destiny_params).to(torch.device('cuda'))
+    # print(model, file=sys.stderr)
+    
+    if lr_type == 0:
+        lr_scheduler = HPSchedule.constant(hp_max=lr)
+    elif lr_type == 1:
+        lr_scheduler = HPSchedule.linear(hp_max=lr, epochs=epochs)
+    elif lr_type == 2:
+        lr_scheduler = HPSchedule.linear_cycle(hp_max=lr, epochs=epochs, low_hp=0.0, extra=0)
+    
+    model.init_optimizer(
+        opt=torch.optim.Adam,
+        params=model.parameters(),
+        hp_scheduler={
+            "lr" : lr_scheduler,
+        },
+    )
+    
+    t = time()
+    for epoch in range(epochs):
+        train_hist = model.train_epoch(dataloaders, mode='train', compute_acc=False)
+    
+    preds, _ = model.predict(dataloaders, mode='valid')
+    
+    for i in range(preds.shape[0]):
+        preds[i][X_train[i]] = -1
+    
+    top_k = to_numpy(preds.topk(k=10, dim=-1)[1])
+    
+    p_at_10 = np.mean([precision(X_test[i], top_k[i][:10]) for i in range(len(X_test))])
+    print(json.dumps({
+        "lr"             : lr,
+        "lr_type"        : lr_type,
+        "destiny_params" : destiny_params,
+        "p_at_10"        : p_at_10,
+    }))
+    
+    return p_at_10
+
+def dlib_find_max_global(f, bounds, int_vars=[], **kwargs):
+    varnames = f.__code__.co_varnames[:f.__code__.co_argcount]
+    bound1_, bound2_, int_vars_ = [], [], []
+    for varname in varnames:
+        bound1_.append(bounds[varname][0])
+        bound2_.append(bounds[varname][1])
+        int_vars_.append(1 if varname in int_vars else 0)
+    
+    return dlib.find_max_global(f, bound1=bound1_, bound2=bound2_, is_integer_variable=int_vars_, **kwargs)
+
 
 if __name__ == "__main__":
     args = parse_args()
@@ -147,62 +223,11 @@ if __name__ == "__main__":
     n_toks = max([max(x) for x in X_train]) + 1
     X_test = [set(x) for x in X_test]
     
-    # --
-    # Dataloaders
-    
-    dataloaders = {
-        "train" : DataLoader(
-            dataset=RaggedAutoencoderDataset(X=X_train, n_toks=n_toks),
-            batch_size=args.batch_size,
-            collate_fn=pad_collate_fn,
-            num_workers=2,
-            pin_memory=True,
-            shuffle=True,
-        ),
-        "valid" : DataLoader(
-            dataset=RaggedAutoencoderDataset(X=X_train, n_toks=n_toks),
-            batch_size=args.batch_size,
-            collate_fn=pad_collate_fn,
-            num_workers=2,
-            pin_memory=True,
-            shuffle=False,
-        )
-    }
-    
-    model = DestinyModel(n_toks=n_toks, emb_dim=args.emb_dim, dropout=args.dropout).to(torch.device('cuda'))
-    model.verbose = not args.no_verbose
-    print(model, file=sys.stderr)
-    
-    # lr_scheduler = HPSchedule.linear_cycle(hp_max=args.lr, epochs=args.epochs, low_hp=0.0, extra=0)
-    
-    model.init_optimizer(
-        opt=torch.optim.Adam,
-        params=model.parameters(),
-        # hp_scheduler={
-        #     "lr" : lr_scheduler,
-        # }
-        lr=args.lr,
-    )
-    
-    t = time()
-    for epoch in range(args.epochs):
-        train_hist = model.train_epoch(dataloaders, mode='train', compute_acc=False)
-        
-        if epoch % args.eval_interval == 0:
-            preds, _ = model.predict(dataloaders, mode='valid')
-            
-            for i in range(preds.shape[0]):
-                preds[i][X_train[i]] = -1
-            
-            top_k = to_numpy(preds.topk(k=10, dim=-1)[1])
-            
-            p_at_01 = np.mean([precision(X_test[i], top_k[i][:1]) for i in range(len(X_test))])
-            p_at_05 = np.mean([precision(X_test[i], top_k[i][:5]) for i in range(len(X_test))])
-            p_at_10 = np.mean([precision(X_test[i], top_k[i][:10]) for i in range(len(X_test))])
-            print(json.dumps(OrderedDict([
-                ("epoch",   epoch),
-                ("p_at_01", p_at_01),
-                ("p_at_05", p_at_05),
-                ("p_at_10", p_at_10),
-                ("elapsed", time() - t),
-            ])))
+    dlib_find_max_global(run_one, {
+        "emb_dim"     : [50, 800],
+        "dropout"     : [0.1, 0.9],
+        "bias_offset" : [-40, -1],
+        "batch_size"  : [16, 256],
+        "lr"          : [-4, -2],
+        "lr_type"     : [0, 2],
+    }, int_vars=["emb_dim", "batch_size", "lr_type"], num_function_calls=256, solver_epsilon=0.002)
