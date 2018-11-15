@@ -242,6 +242,8 @@ if __name__ == "__main__":
         )
     }
     
+    dataloaders['valid'] = list(dataloaders['valid'])
+    
     model = DestinyModel(
         n_toks=n_toks,
         emb_dim=args.emb_dim,
@@ -264,7 +266,10 @@ if __name__ == "__main__":
         
         if epoch % args.eval_interval == 0:
             
+            t = time()
             preds, _ = model.predict(dataloaders, mode='valid', no_cat=True) # no_cat=False if using `slow_topk`
+            print(time() - t)
+            raise Exception
             top_k = fast_topk(preds, X_train)
             
             p_at_01 = np.mean([precision(X_test[i], top_k[i][:1]) for i in range(len(X_test))])
