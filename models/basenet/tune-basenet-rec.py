@@ -217,8 +217,11 @@ if __name__ == "__main__":
         np.save('.X_train_cache.npy', X_train)
         np.save('.X_test_cache.npy', X_test)
     else:
+        print('loading cache', file=sys.stderr)
         X_train = np.load('.X_train_cache.npy')
         X_test = np.load('.X_test_cache.npy')
+        print('len(X_train)=%s' % str(len(X_train)), file=sys.stderr)
+        print('len(X_test)=%s' % str(len(X_test)), file=sys.stderr)
     
     n_toks = max([max(x) for x in X_train]) + 1
     X_test = [set(x) for x in X_test]

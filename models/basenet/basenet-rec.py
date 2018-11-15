@@ -128,8 +128,8 @@ if __name__ == "__main__":
     # IO
     
     if not args.use_cache:
-        train_edges = pd.read_csv(args.train_path, header=None, sep='\t')
-        test_edges  = pd.read_csv(args.test_path, header=None, sep='\t')
+        train_edges = pd.read_csv(args.train_path, header=None, sep='\t')[[0,1]]
+        test_edges  = pd.read_csv(args.test_path, header=None, sep='\t')[[0,1]]
         
         X_train = train_edges.groupby(0)[1].apply(lambda x: list(x + 1)).values # Increment by 1 for padding_idx
         X_test  = test_edges.groupby(0)[1].apply(lambda x: list(x + 1)).values  # Increment by 1 for padding_idx
@@ -138,11 +138,15 @@ if __name__ == "__main__":
         o = np.argsort([len(t) for t in X_test])[::-1]
         X_train, X_test = X_train[o], X_test[o]
         
+        print('saving cache', file=sys.stderr)
         np.save('.X_train_cache.npy', X_train)
         np.save('.X_test_cache.npy', X_test)
     else:
+        print('loading cache', file=sys.stderr)
         X_train = np.load('.X_train_cache.npy')
         X_test = np.load('.X_test_cache.npy')
+        print('X_train.shape=%s' % str(X_train.shape))
+        print('X_test.shape=%s' % str(X_test.shape))
     
     n_toks = max([max(x) for x in X_train]) + 1
     X_test = [set(x) for x in X_test]
@@ -169,7 +173,13 @@ if __name__ == "__main__":
         )
     }
     
-    model = DestinyModel(n_toks=n_toks, emb_dim=args.emb_dim, dropout=args.dropout).to(torch.device('cuda'))
+    model = DestinyModel(
+        n_toks=n_toks,
+        emb_dim=args.emb_dim,
+        dropout=args.dropout,
+        bias_offset=args.bias_offset
+    ).to(torch.device('cuda'))
+    
     model.verbose = not args.no_verbose
     print(model, file=sys.stderr)
     
