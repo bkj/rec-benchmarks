@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 from time import time
 from collections import OrderedDict
+from joblib import Parallel, delayed
 
 import torch
 from torch import nn
@@ -25,6 +26,34 @@ from torch.utils.data import Dataset, DataLoader
 
 # --
 # Helpers
+
+def __filter_and_rank(pred, X_filter, k=10):
+    for i in range(pred.shape[0]):
+        pred[i][X_filter[i]] = -1
+    
+    return np.argsort(-pred, axis=-1)[:,:k]
+
+def fast_topk(preds, X_train, n_jobs=32):
+    offsets = np.cumsum([p.shape[0] for p in preds])
+    offsets -= preds[0].shape[0]
+    
+    jobs = [delayed(__filter_and_rank)(
+        to_numpy(pred),
+        to_numpy(X_train[offset:(offset + pred.shape[0])])
+    ) for pred, offset in zip(preds, offsets)]
+    top_k = Parallel(n_jobs=n_jobs, backend='threading')(jobs)
+    top_k = np.vstack(top_k)
+    
+    return top_k
+
+# def slow_topk(preds, X_train):
+#     preds, _ = model.predict(dataloaders, mode='valid')
+#     for i in range(preds.shape[0]):
+#         preds[i][X_train[i]] = -1
+    
+#     top_k = to_numpy(preds.topk(k=10, dim=-1)[1])
+    
+#     return top_k
 
 class RaggedAutoencoderDataset(Dataset):
     def __init__(self, X, n_toks):
@@ -120,6 +149,7 @@ def parse_args():
     
     return parser.parse_args()
 
+
 if __name__ == "__main__":
     args = parse_args()
     set_seeds(args.seed)
@@ -159,7 +189,7 @@ if __name__ == "__main__":
             dataset=RaggedAutoencoderDataset(X=X_train, n_toks=n_toks),
             batch_size=args.batch_size,
             collate_fn=pad_collate_fn,
-            num_workers=2,
+            num_workers=4,
             pin_memory=True,
             shuffle=True,
         ),
@@ -167,7 +197,7 @@ if __name__ == "__main__":
             dataset=RaggedAutoencoderDataset(X=X_train, n_toks=n_toks),
             batch_size=args.batch_size,
             collate_fn=pad_collate_fn,
-            num_workers=2,
+            num_workers=4,
             pin_memory=True,
             shuffle=False,
         )
@@ -183,36 +213,29 @@ if __name__ == "__main__":
     model.verbose = not args.no_verbose
     print(model, file=sys.stderr)
     
-    # lr_scheduler = HPSchedule.linear_cycle(hp_max=args.lr, epochs=args.epochs, low_hp=0.0, extra=0)
-    
     model.init_optimizer(
         opt=torch.optim.Adam,
         params=model.parameters(),
-        # hp_scheduler={
-        #     "lr" : lr_scheduler,
-        # }
-        lr=args.lr,
+        # lr=args.lr,
     )
     
     t = time()
     for epoch in range(args.epochs):
-        train_hist = model.train_epoch(dataloaders, mode='train', compute_acc=False)
+        train_hist = model.train_epoch(dataloaders, mode='train')
         
         if epoch % args.eval_interval == 0:
-            preds, _ = model.predict(dataloaders, mode='valid')
             
-            for i in range(preds.shape[0]):
-                preds[i][X_train[i]] = -1
-            
-            top_k = to_numpy(preds.topk(k=10, dim=-1)[1])
+            preds, _ = model.predict(dataloaders, mode='valid', no_cat=True) # no_cat=False if using `slow_topk`
+            top_k = fast_topk(preds, X_train)
             
             p_at_01 = np.mean([precision(X_test[i], top_k[i][:1]) for i in range(len(X_test))])
             p_at_05 = np.mean([precision(X_test[i], top_k[i][:5]) for i in range(len(X_test))])
             p_at_10 = np.mean([precision(X_test[i], top_k[i][:10]) for i in range(len(X_test))])
-            print(json.dumps(OrderedDict([
-                ("epoch",   epoch),
-                ("p_at_01", p_at_01),
-                ("p_at_05", p_at_05),
-                ("p_at_10", p_at_10),
-                ("elapsed", time() - t),
-            ])))
+            
+            print(json.dumps({
+                "epoch"   : epoch,
+                "p_at_01" : p_at_01,
+                "p_at_05" : p_at_05,
+                "p_at_10" : p_at_10,
+                "elapsed" : time() - t,
+            }))

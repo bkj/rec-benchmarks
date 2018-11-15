@@ -2,4 +2,4 @@
 
 # run.sh
 
-CUDA_VISIBLE_DEVICES=0 python basenet-rec.py --use-cache
+CUDA_VISIBLE_DEVICES=7 python basenet-rec.py --use-cache
