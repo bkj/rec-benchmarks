@@ -1,3 +1,6 @@
+*jl
+*npy
+*samplesIndex
 data/*
 results/*
 *.nc
