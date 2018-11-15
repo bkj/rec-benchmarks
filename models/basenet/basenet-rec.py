@@ -81,45 +81,65 @@ def pad_collate_fn(batch, pad_value=0):
     return X, y
 
 
+class DropBatchNorm1d(nn.Module):
+    def __init__(self, emb_dim, dropout):
+        super().__init__()
+        
+        self.layers = nn.Sequential(
+            nn.ReLU(),
+            nn.BatchNorm1d(emb_dim),
+            nn.Dropout(dropout)
+        )
+    
+    def forward(self, x):
+        return self.layers(x)
+
+
+class EmbeddingSum(nn.Module):
+    def __init__(self, n_toks, emb_dim):
+        super().__init__()
+        
+        self.emb      = nn.Embedding(n_toks, emb_dim, padding_idx=0)
+        self.emb_bias = nn.Parameter(torch.zeros(emb_dim))
+    
+        torch.nn.init.normal_(self.emb.weight.data, 0, 0.01)
+        self.emb.weight.data[0] = 0
+    
+    def forward(self, x):
+        return self.emb(x).sum(dim=1) + self.emb_bias
+
+
+class DestinyLinear(nn.Module):
+    def __init__(self, in_channels, out_channels, bias_offset):
+        super().__init__()
+        
+        self.linear = nn.Linear(in_channels, out_channels)
+        
+        torch.nn.init.normal_(self.linear.weight.data, 0, 0.01)
+        self.linear.bias.data.zero_()
+        self.linear.bias.data += bias_offset
+    
+    def forward(self, x):
+        return self.linear(x)
+
+
 class DestinyModel(BaseNet):
     def __init__(self, n_toks, emb_dim, dropout, bias_offset):
-        
         def _loss_fn(x, y):
             return F.binary_cross_entropy_with_logits(x, y)
         
         super().__init__(loss_fn=_loss_fn)
         
-        self.emb = nn.Embedding(n_toks, emb_dim, padding_idx=0)
-        
-        self.dropout = dropout
-        
-        self.emb_bias   = nn.Parameter(torch.zeros(emb_dim))
-        self.bn1        = nn.BatchNorm1d(emb_dim)
-        self.hidden     = nn.Linear(emb_dim, emb_dim)
-        self.bn2        = nn.BatchNorm1d(emb_dim)
-        self.classifier = nn.Linear(emb_dim, n_toks)
-        
-        torch.nn.init.normal_(self.emb.weight.data, 0, 0.01)
-        self.emb.weight.data[0] = 0
-        
-        torch.nn.init.normal_(self.hidden.weight.data, 0, 0.01)
-        self.hidden.bias.data.zero_()
-        
-        torch.nn.init.normal_(self.classifier.weight.data, 0, 0.01)
-        self.classifier.bias.data.zero_()
-        self.classifier.bias.data += bias_offset
+        self.layers = nn.Sequential(
+            EmbeddingSum(n_toks, emb_dim),
+            DropBatchNorm1d(emb_dim, dropout=dropout),
+            DestinyLinear(emb_dim, emb_dim, bias_offset=0),
+            DropBatchNorm1d(emb_dim, dropout=dropout),
+            DestinyLinear(emb_dim, n_toks, bias_offset=bias_offset),
+        )
     
     def forward(self, x):
-        x = self.emb(x).sum(dim=1) + self.emb_bias
-        x = self.bn1(F.relu(x))
-        x = F.dropout(x, p=self.dropout, training=self.training)
-        
-        x = self.hidden(x)
-        x = self.bn2(F.relu(x))
-        x = F.dropout(x, p=self.dropout, training=self.training)
-        
-        x = self.classifier(x)
-        return x
+        return self.layers(x)
 
 
 def precision(act, preds):
