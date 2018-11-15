@@ -81,19 +81,6 @@ def pad_collate_fn(batch, pad_value=0):
     return X, y
 
 
-class DropBatchNorm1d(nn.Module):
-    def __init__(self, emb_dim, dropout):
-        super().__init__()
-        
-        self.layers = nn.Sequential(
-            nn.ReLU(),
-            nn.BatchNorm1d(emb_dim),
-            nn.Dropout(dropout)
-        )
-    
-    def forward(self, x):
-        return self.layers(x)
-
 
 class EmbeddingSum(nn.Module):
     def __init__(self, n_toks, emb_dim):
@@ -123,6 +110,28 @@ class DestinyLinear(nn.Module):
         return self.linear(x)
 
 
+class WTALayer(nn.Module):
+    def __init__(self, dim, p):
+        super().__init__()
+        
+        self.dim = dim
+        self.p   = p
+        self.k   = int(np.ceil(dim * p))
+    
+    def forward(self, x):
+        if self.p < 1:
+            # nnz_before = float((x > 0).float().mean())
+            topk = x.topk(k=self.k, dim=-1)[0]
+            topk = topk[:,-1:]
+            x = x * (x >= topk).float()
+            # nnz_after = float((x > 0).float().mean())
+        
+        return x
+    
+    def __repr__(self):
+        return 'WTALayer(dim=%d | p=%f | k=%d)' % (self.dim, self.p, self.k)
+
+
 class DestinyModel(BaseNet):
     def __init__(self, n_toks, emb_dim, dropout, bias_offset):
         def _loss_fn(x, y):
@@ -132,9 +141,19 @@ class DestinyModel(BaseNet):
         
         self.layers = nn.Sequential(
             EmbeddingSum(n_toks, emb_dim),
-            DropBatchNorm1d(emb_dim, dropout=dropout),
+            
+            nn.ReLU(),
+            nn.BatchNorm1d(emb_dim),
+            nn.Dropout(dropout),
+            
             DestinyLinear(emb_dim, emb_dim, bias_offset=0),
-            DropBatchNorm1d(emb_dim, dropout=dropout),
+            
+            WTALayer(emb_dim, p=0.1),
+            
+            nn.ReLU(),
+            nn.BatchNorm1d(emb_dim),
+            nn.Dropout(dropout),
+            
             DestinyLinear(emb_dim, n_toks, bias_offset=bias_offset),
         )
     
