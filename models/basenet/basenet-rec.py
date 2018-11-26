@@ -62,7 +62,7 @@ class RaggedAutoencoderDataset(Dataset):
     
     def __getitem__(self, idx):
         x = self.X[idx]
-        y = torch.zeros((n_toks,))
+        y = torch.zeros((self.n_toks,))
         y[x] += 1
         return self.X[idx], y
     
@@ -81,19 +81,61 @@ def pad_collate_fn(batch, pad_value=0):
     return X, y
 
 
+# class ElapsedModule(nn.Module):
+#     def __init__(self, *args, **kwargs):
+#         super().__init__(*args, **kwargs)
+#         self.elapsed = 0
+    
+#     def forward(self, *args, **kwargs):
+#         # t = time()
+#         x = self._forward(*args, **kwargs)
+#         # self.elapsed += (time() - t)
+#         return x
+        
+#     def __repr__(self):
+#         return super().__repr__()[:-1] + '| elapsed=%f)' % self.elapsed
+
+
+# class EmbeddingSum(nn.Module):
+#     def __init__(self, n_toks, emb_dim):
+#         super().__init__()
+        
+#         self.emb = nn.Embedding(n_toks, emb_dim)#, padding_idx=0)
+        
+#         self.emb_bias = nn.Parameter(torch.zeros(emb_dim))
+        
+#         torch.nn.init.normal_(self.emb.weight.data, 0, 0.01)
+#         self.emb.weight.data[0] = 0
+    
+#     def forward(self, x):
+#         return self.emb(x).sum(dim=1) + self.emb_bias
+
 
 class EmbeddingSum(nn.Module):
     def __init__(self, n_toks, emb_dim):
         super().__init__()
         
-        self.emb      = nn.Embedding(n_toks, emb_dim, padding_idx=0)
+        self.emb_dim = emb_dim
+        self.emb = nn.Embedding(n_toks, emb_dim, padding_idx=0)#, sparse=True)
+        
         self.emb_bias = nn.Parameter(torch.zeros(emb_dim))
-    
+        
         torch.nn.init.normal_(self.emb.weight.data, 0, 0.01)
         self.emb.weight.data[0] = 0
-    
+        
+        # self.ew = None
+        
     def forward(self, x):
-        return self.emb(x).sum(dim=1) + self.emb_bias
+        bs   = x.shape[0]
+        nobs = x.shape[1]
+        
+        # if self.ew is not None:
+        #     print('self.ew.grad', self.ew.grad)
+        
+        # del self.ew
+        tmp = self.emb.weight[x.view(-1)].view(bs, nobs, self.emb_dim).sum(dim=1)
+        return tmp + self.emb_bias
+
 
 
 class DestinyLinear(nn.Module):
@@ -105,7 +147,7 @@ class DestinyLinear(nn.Module):
         torch.nn.init.normal_(self.linear.weight.data, 0, 0.01)
         self.linear.bias.data.zero_()
         self.linear.bias.data += bias_offset
-    
+        
     def forward(self, x):
         return self.linear(x)
 
@@ -148,7 +190,7 @@ class DestinyModel(BaseNet):
             
             DestinyLinear(emb_dim, emb_dim, bias_offset=0),
             
-            WTALayer(emb_dim, p=0.1),
+            # WTALayer(emb_dim, p=0.1),
             
             nn.ReLU(),
             nn.BatchNorm1d(emb_dim),
@@ -184,7 +226,7 @@ def parse_args():
     parser.add_argument('--use-cache', action="store_true")
     parser.add_argument('--eval-interval', type=int, default=1)
     parser.add_argument('--no-verbose', action="store_true")
-    parser.add_argument('--seed', type=int, default=456)
+    parser.add_argument('--seed', type=int, default=123)
     
     return parser.parse_args()
 
@@ -226,23 +268,26 @@ if __name__ == "__main__":
     dataloaders = {
         "train" : DataLoader(
             dataset=RaggedAutoencoderDataset(X=X_train, n_toks=n_toks),
-            batch_size=args.batch_size,
+            batch_size=args.batch_size // 2,
             collate_fn=pad_collate_fn,
-            num_workers=4,
-            pin_memory=True,
-            shuffle=True,
+            num_workers=16,
+            pin_memory=False,
+            shuffle=False, # !!
         ),
         "valid" : DataLoader(
             dataset=RaggedAutoencoderDataset(X=X_train, n_toks=n_toks),
-            batch_size=args.batch_size,
+            batch_size=args.batch_size // 2,
             collate_fn=pad_collate_fn,
-            num_workers=4,
-            pin_memory=True,
+            num_workers=16,
+            pin_memory=False,
             shuffle=False,
-        )
+        ),
     }
     
-    dataloaders['valid'] = list(dataloaders['valid'])
+    # if timing, precompute the dataloaders.
+    # otherwise, they may impact timing information
+    # dataloaders['train'] = list(dataloaders['train'])
+    # dataloaders['valid'] = list(dataloaders['valid'])
     
     model = DestinyModel(
         n_toks=n_toks,
@@ -257,7 +302,8 @@ if __name__ == "__main__":
     model.init_optimizer(
         opt=torch.optim.Adam,
         params=model.parameters(),
-        # lr=args.lr,
+        # lr=0.1,
+        # momentum=0.99,
     )
     
     t = time()
@@ -268,8 +314,8 @@ if __name__ == "__main__":
             
             t = time()
             preds, _ = model.predict(dataloaders, mode='valid', no_cat=True) # no_cat=False if using `slow_topk`
-            print(time() - t)
-            raise Exception
+            print('eval time', time() - t)
+            
             top_k = fast_topk(preds, X_train)
             
             p_at_01 = np.mean([precision(X_test[i], top_k[i][:1]) for i in range(len(X_test))])
@@ -283,3 +329,5 @@ if __name__ == "__main__":
                 "p_at_10" : p_at_10,
                 "elapsed" : time() - t,
             }))
+        
+        break
