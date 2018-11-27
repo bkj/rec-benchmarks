@@ -4,6 +4,7 @@
     basenet-rec.py
 """
 
+import os
 import sys
 import json
 import argparse
@@ -13,6 +14,7 @@ from time import time
 from collections import OrderedDict
 from joblib import Parallel, delayed
 
+import faiss
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -20,7 +22,6 @@ from torch.autograd import Variable
 
 from basenet import BaseNet, HPSchedule
 from basenet.helpers import to_numpy, set_seeds
-from basenet.text.data import SortishSampler
 
 from torch.utils.data import Dataset, DataLoader
 
@@ -77,6 +78,9 @@ def pad_collate_fn(batch, pad_value=0):
     X = [F.pad(xx, pad=(max_len - len(xx), 0), value=pad_value).data for xx in X]
     
     X = torch.stack(X, dim=-1).t().contiguous()
+    # <<
+    X = X[:,:100]
+    # >>
     y = torch.stack(y, dim=0)
     return X, y
 
@@ -86,51 +90,76 @@ class EmbeddingSum(nn.Module):
     def __init__(self, n_toks, emb_dim):
         super().__init__()
         
-        self.emb      = nn.Embedding(n_toks, emb_dim, padding_idx=0)
+        # <<
+        # self.emb = nn.Embedding(n_toks, emb_dim, padding_idx=0)
+        # --
+        self.emb = nn.EmbeddingBag(n_toks, emb_dim)
+        # >>
         self.emb_bias = nn.Parameter(torch.zeros(emb_dim))
-    
+        
         torch.nn.init.normal_(self.emb.weight.data, 0, 0.01)
         self.emb.weight.data[0] = 0
     
     def forward(self, x):
-        return self.emb(x).sum(dim=1) + self.emb_bias
+        # <<
+        # out = self.emb(x).sum(dim=1) + self.emb_bias
+        # --
+        out = self.emb(x) + self.emb_bias
+        # >>
+        return out
 
 
-class DestinyLinear(nn.Module):
+class DestinyLinear(nn.Linear):
     def __init__(self, in_channels, out_channels, bias_offset):
-        super().__init__()
-        
-        self.linear = nn.Linear(in_channels, out_channels)
-        
-        torch.nn.init.normal_(self.linear.weight.data, 0, 0.01)
-        self.linear.bias.data.zero_()
-        self.linear.bias.data += bias_offset
-    
-    def forward(self, x):
-        return self.linear(x)
+        super().__init__(in_channels, out_channels, bias=True)
+        torch.nn.init.normal_(self.weight.data, 0, 0.01)
+        self.bias.data.zero_()
+        self.bias.data += bias_offset
 
 
-class WTALayer(nn.Module):
-    def __init__(self, dim, p):
+class ApproxDestinyLinear(nn.Module):
+    def __init__(self, linear, batch_size, k, nprobe, npartitions):
         super().__init__()
         
-        self.dim = dim
-        self.p   = p
-        self.k   = int(np.ceil(dim * p))
-    
+        assert linear.bias is not None
+        
+        w = linear.weight.detach().cpu().numpy()
+        # b = linear.bias.detach().cpu().numpy().reshape(-1, 1)
+        # self.weights   = np.hstack([w, b])
+        self.weights = w
+        
+        # self.cpu_index = faiss.IndexFlatIP(self.weights.shape[1])
+        self.cpu_index = faiss.index_factory(self.weights.shape[1], f"IVF{npartitions},Flat")
+        self.cpu_index.train(self.weights)
+        self.cpu_index.add(self.weights)
+        self.cpu_index.nprobe = nprobe
+        
+        self.res   = faiss.StandardGpuResources()
+        self.index = faiss.index_cpu_to_gpu(self.res, 0, self.cpu_index)
+        
+        self.k = k
+        self.I    = torch.LongTensor(batch_size, k).cuda()
+        self.D    = torch.FloatTensor(batch_size, k).cuda()
+        self.Dptr = faiss.cast_integer_to_float_ptr(self.D.storage().data_ptr())
+        self.Iptr = faiss.cast_integer_to_long_ptr(self.I.storage().data_ptr())
+        
+        print('ApproxDestinyLinear: warmup', file=sys.stderr)
+        X = torch.randn(batch_size, self.weights.shape[1]).cuda()
+        self.forward(X)
+        
     def forward(self, x):
-        if self.p < 1:
-            # nnz_before = float((x > 0).float().mean())
-            topk = x.topk(k=self.k, dim=-1)[0]
-            topk = topk[:,-1:]
-            x = x * (x >= topk).float()
-            # nnz_after = float((x > 0).float().mean())
+        # xb = torch.ones(x.shape[0], 1).cuda()
+        # q = torch.cat([x, xb], dim=-1)
+        xptr = faiss.cast_integer_to_float_ptr(x.storage().data_ptr())
+        self.index.search_c(
+            x.shape[0],
+            xptr,
+            self.k,
+            self.Dptr,
+            self.Iptr,
+        )
         
         return x
-    
-    def __repr__(self):
-        return 'WTALayer(dim=%d | p=%f | k=%d)' % (self.dim, self.p, self.k)
-
 
 class DestinyModel(BaseNet):
     def __init__(self, n_toks, emb_dim, dropout, bias_offset):
@@ -142,23 +171,33 @@ class DestinyModel(BaseNet):
         self.layers = nn.Sequential(
             EmbeddingSum(n_toks, emb_dim),
             
-            nn.ReLU(),
-            nn.BatchNorm1d(emb_dim),
-            nn.Dropout(dropout),
+            # nn.ReLU(),
+            # nn.BatchNorm1d(emb_dim),
+            # nn.Dropout(dropout),
             
-            DestinyLinear(emb_dim, emb_dim, bias_offset=0),
+            # DestinyLinear(emb_dim, emb_dim, bias_offset=0),
             
-            WTALayer(emb_dim, p=0.1),
-            
-            nn.ReLU(),
-            nn.BatchNorm1d(emb_dim),
-            nn.Dropout(dropout),
-            
-            DestinyLinear(emb_dim, n_toks, bias_offset=bias_offset),
+            # nn.ReLU(),
+            # nn.BatchNorm1d(emb_dim),
+            # nn.Dropout(dropout),
         )
+        
+        # self.final = DestinyLinear(emb_dim, n_toks, bias_offset=bias_offset)
+        self.final = DestinyLinear(emb_dim, 100000, bias_offset=bias_offset)
+        
+        self.approx_final = None
+    
+    def set_approx_final(self, batch_size, k, nprobe, npartitions):
+        self.k = k
+        self.approx_final = ApproxDestinyLinear(self.final, batch_size, k, nprobe, npartitions)
     
     def forward(self, x):
-        return self.layers(x)
+        x = self.layers(x)
+        if self.training or self.exact:
+            return self.final(x)
+        else:
+            assert self.approx_final is not None
+            return self.approx_final(x)
 
 
 def precision(act, preds):
@@ -166,6 +205,11 @@ def precision(act, preds):
 
 # --
 # Run
+
+valid_batch_size = 1000
+valid_k          = 32
+npartitions      = 1024
+nprobe           = 32
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -178,10 +222,10 @@ def parse_args():
     parser.add_argument('--lr', type=float, default=0.01)
     parser.add_argument('--bias-offset', type=float, default=-10)
     
-    parser.add_argument('--emb-dim', type=int, default=800)
+    parser.add_argument('--emb-dim', type=int, default=128)
     parser.add_argument('--dropout', type=float, default=0.5)
     
-    parser.add_argument('--use-cache', action="store_true")
+    parser.add_argument('--no-cache', action="store_true")
     parser.add_argument('--eval-interval', type=int, default=1)
     parser.add_argument('--no-verbose', action="store_true")
     parser.add_argument('--seed', type=int, default=456)
@@ -196,7 +240,7 @@ if __name__ == "__main__":
     # --
     # IO
     
-    if not args.use_cache:
+    if args.no_cache:
         train_edges = pd.read_csv(args.train_path, header=None, sep='\t')[[0,1]]
         test_edges  = pd.read_csv(args.test_path, header=None, sep='\t')[[0,1]]
         
@@ -213,12 +257,12 @@ if __name__ == "__main__":
     else:
         print('loading cache', file=sys.stderr)
         X_train = np.load('.X_train_cache.npy')
-        X_test = np.load('.X_test_cache.npy')
-        print('X_train.shape=%s' % str(X_train.shape))
-        print('X_test.shape=%s' % str(X_test.shape))
+        X_test  = np.load('.X_test_cache.npy')
     
     n_toks = max([max(x) for x in X_train]) + 1
     X_test = [set(x) for x in X_test]
+    
+    print('n_toks=%d' % n_toks, file=sys.stderr)
     
     # --
     # Dataloaders
@@ -234,15 +278,13 @@ if __name__ == "__main__":
         ),
         "valid" : DataLoader(
             dataset=RaggedAutoencoderDataset(X=X_train, n_toks=n_toks),
-            batch_size=args.batch_size,
+            batch_size=valid_batch_size,
             collate_fn=pad_collate_fn,
             num_workers=4,
             pin_memory=True,
             shuffle=False,
         )
     }
-    
-    dataloaders['valid'] = list(dataloaders['valid'])
     
     model = DestinyModel(
         n_toks=n_toks,
@@ -260,26 +302,40 @@ if __name__ == "__main__":
         # lr=args.lr,
     )
     
+    print('preloading dataloaders', file=sys.stderr)
+    dataloaders['valid'] = list(dataloaders['valid']) # Preload data
+    
     t = time()
     for epoch in range(args.epochs):
-        train_hist = model.train_epoch(dataloaders, mode='train')
+        # train_hist = model.train_epoch(dataloaders, mode='train', num_batches=100)
         
         if epoch % args.eval_interval == 0:
             
+            print('set_approx_final')
+            model.set_approx_final(batch_size=valid_batch_size, k=valid_k, nprobe=nprobe, npartitions=npartitions)
+            
             t = time()
+            model.exact = False
             preds, _ = model.predict(dataloaders, mode='valid', no_cat=True) # no_cat=False if using `slow_topk`
             print(time() - t)
-            raise Exception
-            top_k = fast_topk(preds, X_train)
             
-            p_at_01 = np.mean([precision(X_test[i], top_k[i][:1]) for i in range(len(X_test))])
-            p_at_05 = np.mean([precision(X_test[i], top_k[i][:5]) for i in range(len(X_test))])
-            p_at_10 = np.mean([precision(X_test[i], top_k[i][:10]) for i in range(len(X_test))])
+            t = time()
+            model.exact = True
+            preds, _ = model.predict(dataloaders, mode='valid', no_cat=True) # no_cat=False if using `slow_topk`
+            print(time() - t)
             
-            print(json.dumps({
-                "epoch"   : epoch,
-                "p_at_01" : p_at_01,
-                "p_at_05" : p_at_05,
-                "p_at_10" : p_at_10,
-                "elapsed" : time() - t,
-            }))
+            os._exit(0)
+            
+            # top_k = fast_topk(preds, X_train)
+            
+            # p_at_01 = np.mean([precision(X_test[i], top_k[i][:1]) for i in range(len(X_test))])
+            # p_at_05 = np.mean([precision(X_test[i], top_k[i][:5]) for i in range(len(X_test))])
+            # p_at_10 = np.mean([precision(X_test[i], top_k[i][:10]) for i in range(len(X_test))])
+            
+            # print(json.dumps({
+            #     "epoch"   : epoch,
+            #     "p_at_01" : p_at_01,
+            #     "p_at_05" : p_at_05,
+            #     "p_at_10" : p_at_10,
+            #     "elapsed" : time() - t,
+            # }))
