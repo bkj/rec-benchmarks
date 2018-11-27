@@ -90,28 +90,28 @@ class EmbeddingSum(nn.Module):
         # <<
         # self.emb = nn.Embedding(n_toks, emb_dim, padding_idx=0)
         # --
-        self.emb = nn.EmbeddingBag(n_toks, emb_dim)
+        self.emb = nn.EmbeddingBag(n_toks, emb_dim) # !! Faster at inference time, waay slower at training
         # >>
         self.emb_bias = nn.Parameter(torch.zeros(emb_dim))
         
-        torch.nn.init.normal_(self.emb.weight.data, 0, 0.01)
+        # torch.nn.init.normal_(self.emb.weight.data, 0, 0.01) # !! Slows down approx. _a lot_
         self.emb.weight.data[0] = 0
     
     def forward(self, x):
         # <<
         # out = self.emb(x).sum(dim=1) + self.emb_bias
         # --
-        out = self.emb(x) + self.emb_bias
+        out = self.emb(x) + self.emb_bias # !! Faster at inference time
         # >>
         return out
 
 
 class DestinyLinear(nn.Linear):
     def __init__(self, in_channels, out_channels, bias_offset):
-        super().__init__(in_channels, out_channels, bias=True)
+        super().__init__(in_channels, out_channels, bias=False) # !! bias not handled by approx yet
         torch.nn.init.normal_(self.weight.data, 0, 0.01)
-        self.bias.data.zero_()
-        self.bias.data += bias_offset
+        # self.bias.data.zero_()
+        # self.bias.data += bias_offset
 
 
 class ApproxLinear(nn.Module):
@@ -120,7 +120,11 @@ class ApproxLinear(nn.Module):
         
         self.weights = linear.weight.detach().cpu().numpy()
         
-        self.cpu_index = faiss.index_factory(self.weights.shape[1], f"IVF{npartitions},Flat")
+        self.cpu_index = faiss.index_factory(
+            self.weights.shape[1],
+            f"IVF{npartitions},Flat",
+            faiss.METRIC_INNER_PRODUCT
+        )
         self.cpu_index.train(self.weights)
         self.cpu_index.add(self.weights)
         self.cpu_index.nprobe = nprobe
@@ -147,24 +151,21 @@ class ApproxLinear(nn.Module):
 
 
 class DestinyModel(BaseNet):
-    def __init__(self, n_toks, out_dim, emb_dim, dropout, bias_offset, topk):
-        def _loss_fn(x, y):
-            return F.binary_cross_entropy_with_logits(x, y)
+    def __init__(self, n_toks, emb_dim, out_dim, topk, dropout, bias_offset):
+        super().__init__(loss_fn=F.binary_cross_entropy_with_logits)
         
-        super().__init__(loss_fn=_loss_fn)
-        
-        self.layers = nn.Sequential(
+        self.emb = nn.Sequential(
             EmbeddingSum(n_toks, emb_dim),
             
-            # nn.ReLU(),
-            # nn.BatchNorm1d(emb_dim),
-            # nn.Dropout(dropout),
+            nn.ReLU(),
+            nn.BatchNorm1d(emb_dim),
+            nn.Dropout(dropout),
             
-            # DestinyLinear(emb_dim, emb_dim, bias_offset=0),
+            DestinyLinear(emb_dim, emb_dim, bias_offset=0),
             
-            # nn.ReLU(),
-            # nn.BatchNorm1d(emb_dim),
-            # nn.Dropout(dropout),
+            nn.ReLU(),
+            nn.BatchNorm1d(emb_dim),
+            nn.Dropout(dropout),
         )
         
         # <<
@@ -175,13 +176,17 @@ class DestinyModel(BaseNet):
         # >>
         
         self.approx_linear = None # Init later
-        self.topk = topk
+        self.topk          = topk
+        self.exact         = None
     
     def set_approx_linear(self, batch_size, nprobe, npartitions):
         self.approx_linear = ApproxLinear(self.linear, batch_size, self.topk, nprobe, npartitions)
     
     def forward(self, x):
-        x = self.layers(x)
+        assert self.exact is not None
+        
+        x = self.emb(x)
+        
         if self.exact:
             x = self.linear(x)
             # x = x.topk(k=self.topk, dim=-1)[1] # Expensive!
@@ -281,19 +286,19 @@ if __name__ == "__main__":
         n_toks=n_toks,
         emb_dim=args.emb_dim,
         out_dim=out_dim,
+        topk=topk,
+        
         dropout=args.dropout,
         bias_offset=args.bias_offset,
-        topk=topk,
     ).to(torch.device('cuda'))
-    
     model.verbose = not args.no_verbose
     print(model, file=sys.stderr)
     
-    model.init_optimizer(
-        opt=torch.optim.Adam,
-        params=model.parameters(),
-        # lr=args.lr,
-    )
+    # model.init_optimizer(
+    #     opt=torch.optim.Adam,
+    #     params=model.parameters(),
+    #     # lr=args.lr,
+    # )
     
     print('preloading dataloaders + warming up', file=sys.stderr)
     dataloaders['valid'] = list(dataloaders['valid'])
@@ -305,6 +310,7 @@ if __name__ == "__main__":
         
         if epoch % args.eval_interval == 0:
             
+            print('set_approx_linear', file=sys.stderr)
             model.set_approx_linear(batch_size=args.batch_size, nprobe=nprobe, npartitions=npartitions)
             model.exact = False; _ = model(dataloaders['valid'][0][0].cuda()).cpu()
             

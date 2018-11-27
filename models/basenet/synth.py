@@ -5,6 +5,11 @@
     
     Comparison of FAISS lookup and pytorch GPU matmul
     for large softmax output layer
+    
+    !! Uses the `ann` branch of basenet, where `model.predict` doesn't actually return anything from the GPU
+    
+    !! Need some way to quantify accuracy
+    !! Could also use `IVFx,PQy` index
 """
 
 import os
@@ -34,7 +39,11 @@ class ApproxLinear(nn.Module):
         
         self.weights = linear.weight.detach().cpu().numpy()
         
-        self.cpu_index = faiss.index_factory(self.weights.shape[1], f"IVF{npartitions},Flat")
+        self.cpu_index = faiss.index_factory(
+            self.weights.shape[1],
+            f"IVF{npartitions},Flat",
+            faiss.METRIC_INNER_PRODUCT
+        )
         self.cpu_index.train(self.weights)
         self.cpu_index.add(self.weights)
         self.cpu_index.nprobe = nprobe
@@ -88,7 +97,9 @@ class Model(BaseNet):
 def parse_args():
     parser = argparse.ArgumentParser()
     
-    parser.add_argument('--n-toks',      type=int, default=25878)
+    parser.add_argument('--n-toks',      type=int, default=25878) # only effects embedding layer overhead
+    parser.add_argument('--seq-len',     type=int, default=100)   # only effects embedding layer overhead
+    parser.add_argument('--n-batches',   type=int, default=100)   # only effects embedding layer overhead
     
     parser.add_argument('--batch-size',  type=int, default=2048)
     parser.add_argument('--emb-dim',     type=int, default=128)
@@ -98,10 +109,9 @@ def parse_args():
     parser.add_argument('--nprobe',      type=int, default=32)
     parser.add_argument('--npartitions', type=int, default=8192)
     
-    parser.add_argument('--seq-len',     type=int, default=100) # only effects embedding speed
-    parser.add_argument('--n-batches',   type=int, default=100) # only effects embedding speed
-    
     parser.add_argument('--seed', type=int, default=123)
+    parser.add_argument('--verbose', action="store_true")
+    
     return parser.parse_args()
 
 
@@ -136,6 +146,7 @@ if __name__ == "__main__":
         nprobe=args.nprobe,
         npartitions=args.npartitions,
     ).to(torch.device('cuda'))
+    model.verbose = args.verbose
     # print(model, file=sys.stderr)
     
     # Warmup
