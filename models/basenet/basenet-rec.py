@@ -78,9 +78,6 @@ def pad_collate_fn(batch, pad_value=0):
     X = [F.pad(xx, pad=(max_len - len(xx), 0), value=pad_value).data for xx in X]
     
     X = torch.stack(X, dim=-1).t().contiguous()
-    # <<
-    X = X[:,:100]
-    # >>
     y = torch.stack(y, dim=0)
     return X, y
 
@@ -117,18 +114,12 @@ class DestinyLinear(nn.Linear):
         self.bias.data += bias_offset
 
 
-class ApproxDestinyLinear(nn.Module):
-    def __init__(self, linear, batch_size, k, nprobe, npartitions):
+class ApproxLinear(nn.Module):
+    def __init__(self, linear, batch_size, topk, nprobe, npartitions):
         super().__init__()
         
-        assert linear.bias is not None
+        self.weights = linear.weight.detach().cpu().numpy()
         
-        w = linear.weight.detach().cpu().numpy()
-        # b = linear.bias.detach().cpu().numpy().reshape(-1, 1)
-        # self.weights   = np.hstack([w, b])
-        self.weights = w
-        
-        # self.cpu_index = faiss.IndexFlatIP(self.weights.shape[1])
         self.cpu_index = faiss.index_factory(self.weights.shape[1], f"IVF{npartitions},Flat")
         self.cpu_index.train(self.weights)
         self.cpu_index.add(self.weights)
@@ -137,32 +128,26 @@ class ApproxDestinyLinear(nn.Module):
         self.res   = faiss.StandardGpuResources()
         self.index = faiss.index_cpu_to_gpu(self.res, 0, self.cpu_index)
         
-        self.k = k
-        self.I    = torch.LongTensor(batch_size, k).cuda()
-        self.D    = torch.FloatTensor(batch_size, k).cuda()
+        self.topk = topk
+        self.I    = torch.LongTensor(batch_size, topk).cuda()
+        self.D    = torch.FloatTensor(batch_size, topk).cuda()
         self.Dptr = faiss.cast_integer_to_float_ptr(self.D.storage().data_ptr())
         self.Iptr = faiss.cast_integer_to_long_ptr(self.I.storage().data_ptr())
         
-        print('ApproxDestinyLinear: warmup', file=sys.stderr)
-        X = torch.randn(batch_size, self.weights.shape[1]).cuda()
-        self.forward(X)
-        
     def forward(self, x):
-        # xb = torch.ones(x.shape[0], 1).cuda()
-        # q = torch.cat([x, xb], dim=-1)
         xptr = faiss.cast_integer_to_float_ptr(x.storage().data_ptr())
         self.index.search_c(
             x.shape[0],
             xptr,
-            self.k,
+            self.topk,
             self.Dptr,
             self.Iptr,
         )
-        
-        return x
+        return self.I
+
 
 class DestinyModel(BaseNet):
-    def __init__(self, n_toks, emb_dim, dropout, bias_offset):
+    def __init__(self, n_toks, out_dim, emb_dim, dropout, bias_offset, topk):
         def _loss_fn(x, y):
             return F.binary_cross_entropy_with_logits(x, y)
         
@@ -182,22 +167,29 @@ class DestinyModel(BaseNet):
             # nn.Dropout(dropout),
         )
         
-        # self.final = DestinyLinear(emb_dim, n_toks, bias_offset=bias_offset)
-        self.final = DestinyLinear(emb_dim, 100000, bias_offset=bias_offset)
+        # <<
+        # Made this bigger, because `n_toks` on this dataset isn't big enough to see gains
+        # self.linear        = DestinyLinear(emb_dim, n_toks, bias_offset=bias_offset)
+        # --
+        self.linear        = DestinyLinear(emb_dim, out_dim, bias_offset=bias_offset)
+        # >>
         
-        self.approx_final = None
+        self.approx_linear = None # Init later
+        self.topk = topk
     
-    def set_approx_final(self, batch_size, k, nprobe, npartitions):
-        self.k = k
-        self.approx_final = ApproxDestinyLinear(self.final, batch_size, k, nprobe, npartitions)
+    def set_approx_linear(self, batch_size, nprobe, npartitions):
+        self.approx_linear = ApproxLinear(self.linear, batch_size, self.topk, nprobe, npartitions)
     
     def forward(self, x):
         x = self.layers(x)
-        if self.training or self.exact:
-            return self.final(x)
+        if self.exact:
+            x = self.linear(x)
+            # x = x.topk(k=self.topk, dim=-1)[1] # Expensive!
         else:
-            assert self.approx_final is not None
-            return self.approx_final(x)
+            assert self.approx_linear is not None
+            x = self.approx_linear(x)
+        
+        return x
 
 
 def precision(act, preds):
@@ -206,10 +198,10 @@ def precision(act, preds):
 # --
 # Run
 
-valid_batch_size = 1000
-valid_k          = 32
-npartitions      = 1024
+out_dim          = 400000
+topk             = 32
 nprobe           = 32
+npartitions      = 8192
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -217,14 +209,13 @@ def parse_args():
     parser.add_argument('--train-path', type=str, default='../../data/edgelist-train.tsv')
     parser.add_argument('--test-path', type=str, default='../../data/edgelist-test.tsv')
     
+    parser.add_argument('--batch-size', type=int, default=2048)
+    parser.add_argument('--emb-dim', type=int, default=128)
+    
     parser.add_argument('--epochs', type=int, default=10)
-    parser.add_argument('--batch-size', type=int, default=256)
     parser.add_argument('--lr', type=float, default=0.01)
     parser.add_argument('--bias-offset', type=float, default=-10)
-    
-    parser.add_argument('--emb-dim', type=int, default=128)
     parser.add_argument('--dropout', type=float, default=0.5)
-    
     parser.add_argument('--no-cache', action="store_true")
     parser.add_argument('--eval-interval', type=int, default=1)
     parser.add_argument('--no-verbose', action="store_true")
@@ -268,20 +259,20 @@ if __name__ == "__main__":
     # Dataloaders
     
     dataloaders = {
-        "train" : DataLoader(
+        # "train" : DataLoader(
+        #     dataset=RaggedAutoencoderDataset(X=X_train, n_toks=n_toks),
+        #     batch_size=args.batch_size,
+        #     collate_fn=pad_collate_fn,
+        #     num_workers=4,
+        #     pin_memory=True,
+        #     shuffle=True,
+        # ),
+        "valid" : DataLoader(
             dataset=RaggedAutoencoderDataset(X=X_train, n_toks=n_toks),
             batch_size=args.batch_size,
             collate_fn=pad_collate_fn,
             num_workers=4,
-            pin_memory=True,
-            shuffle=True,
-        ),
-        "valid" : DataLoader(
-            dataset=RaggedAutoencoderDataset(X=X_train, n_toks=n_toks),
-            batch_size=valid_batch_size,
-            collate_fn=pad_collate_fn,
-            num_workers=4,
-            pin_memory=True,
+            pin_memory=False,
             shuffle=False,
         )
     }
@@ -289,8 +280,10 @@ if __name__ == "__main__":
     model = DestinyModel(
         n_toks=n_toks,
         emb_dim=args.emb_dim,
+        out_dim=out_dim,
         dropout=args.dropout,
-        bias_offset=args.bias_offset
+        bias_offset=args.bias_offset,
+        topk=topk,
     ).to(torch.device('cuda'))
     
     model.verbose = not args.no_verbose
@@ -302,8 +295,9 @@ if __name__ == "__main__":
         # lr=args.lr,
     )
     
-    print('preloading dataloaders', file=sys.stderr)
-    dataloaders['valid'] = list(dataloaders['valid']) # Preload data
+    print('preloading dataloaders + warming up', file=sys.stderr)
+    dataloaders['valid'] = list(dataloaders['valid'])
+    model.exact = True;  _ = model(dataloaders['valid'][0][0].cuda()).cpu()
     
     t = time()
     for epoch in range(args.epochs):
@@ -311,18 +305,18 @@ if __name__ == "__main__":
         
         if epoch % args.eval_interval == 0:
             
-            print('set_approx_final')
-            model.set_approx_final(batch_size=valid_batch_size, k=valid_k, nprobe=nprobe, npartitions=npartitions)
+            model.set_approx_linear(batch_size=args.batch_size, nprobe=nprobe, npartitions=npartitions)
+            model.exact = False; _ = model(dataloaders['valid'][0][0].cuda()).cpu()
             
             t = time()
             model.exact = False
             preds, _ = model.predict(dataloaders, mode='valid', no_cat=True) # no_cat=False if using `slow_topk`
-            print(time() - t)
+            print('exact=False', time() - t)
             
             t = time()
             model.exact = True
             preds, _ = model.predict(dataloaders, mode='valid', no_cat=True) # no_cat=False if using `slow_topk`
-            print(time() - t)
+            print('exact=True', time() - t)
             
             os._exit(0)
             
