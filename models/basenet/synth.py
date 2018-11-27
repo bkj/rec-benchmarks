@@ -42,7 +42,7 @@ class ApproxLinear(nn.Module):
         self.cpu_index = faiss.index_factory(
             self.weights.shape[1],
             f"IVF{npartitions},Flat",
-            faiss.METRIC_INNER_PRODUCT
+            # faiss.METRIC_INNER_PRODUCT # This appears to be slower -- why? And can we get away w/ L2 at inference time?
         )
         self.cpu_index.train(self.weights)
         self.cpu_index.add(self.weights)

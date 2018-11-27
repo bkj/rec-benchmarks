@@ -94,7 +94,7 @@ class EmbeddingSum(nn.Module):
         # >>
         self.emb_bias = nn.Parameter(torch.zeros(emb_dim))
         
-        # torch.nn.init.normal_(self.emb.weight.data, 0, 0.01) # !! Slows down approx. _a lot_
+        torch.nn.init.normal_(self.emb.weight.data, 0, 0.01) # !! Slows down approx. _a lot_ (at high dimensions?)
         self.emb.weight.data[0] = 0
     
     def forward(self, x):
@@ -110,8 +110,8 @@ class DestinyLinear(nn.Linear):
     def __init__(self, in_channels, out_channels, bias_offset):
         super().__init__(in_channels, out_channels, bias=False) # !! bias not handled by approx yet
         torch.nn.init.normal_(self.weight.data, 0, 0.01)
-        # self.bias.data.zero_()
-        # self.bias.data += bias_offset
+        # self.bias.data.zero_()        # !!
+        # self.bias.data += bias_offset # !!
 
 
 class ApproxLinear(nn.Module):
@@ -123,7 +123,8 @@ class ApproxLinear(nn.Module):
         self.cpu_index = faiss.index_factory(
             self.weights.shape[1],
             f"IVF{npartitions},Flat",
-            faiss.METRIC_INNER_PRODUCT
+            # faiss.METRIC_INNER_PRODUCT # This appears to be slower -- why? And can we get away w/ L2 at inference time?
+            faiss.METRIC_L2
         )
         self.cpu_index.train(self.weights)
         self.cpu_index.add(self.weights)
@@ -306,6 +307,7 @@ if __name__ == "__main__":
     
     t = time()
     for epoch in range(args.epochs):
+        
         # train_hist = model.train_epoch(dataloaders, mode='train', num_batches=100)
         
         if epoch % args.eval_interval == 0:
