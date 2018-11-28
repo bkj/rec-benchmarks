@@ -103,7 +103,7 @@ class EmbeddingSum(nn.Module):
 
 
 class DestinyLinear(nn.Linear):
-    def __init__(self, in_channels, out_channels, bias_offset):
+    def __init__(self, in_channels, out_channels, bias_offset=0.0):
         super().__init__(in_channels, out_channels, bias=True) # !! bias not handled by approx yet
         torch.nn.init.normal_(self.weight.data, 0, 0.01)
         self.bias.data.zero_()        # !!
@@ -152,6 +152,7 @@ def parse_args():
     parser.add_argument('--lr', type=float, default=0.01)
     parser.add_argument('--bias-offset', type=float, default=-10)
     parser.add_argument('--dropout', type=float, default=0.5)
+    
     parser.add_argument('--eval-interval', type=int, default=1)
     parser.add_argument('--no-verbose', action="store_true")
     parser.add_argument('--seed', type=int, default=456)

@@ -33,6 +33,16 @@ from basenet.helpers import set_seeds
 
 from torch.utils.data import Dataset, DataLoader
 
+def benchmark_predict(model, dataloaders, mode='val', no_cat=False, dummy=False):
+    _ = model.eval()
+    for data, _ in dataloaders[mode]:
+        with torch.no_grad():
+            data = data.cuda(async=True)
+            out  = model(data)
+    
+    torch.cuda.synchronize()
+
+
 class ApproxLinear(nn.Module):
     def __init__(self, linear, batch_size, topk, nprobe, npartitions):
         super().__init__()
@@ -41,8 +51,10 @@ class ApproxLinear(nn.Module):
         
         self.cpu_index = faiss.index_factory(
             self.weights.shape[1],
-            f"IVF{npartitions},Flat",
-            # faiss.METRIC_INNER_PRODUCT # This appears to be slower -- why? And can we get away w/ L2 at inference time?
+            # f"IVF{npartitions},Flat",
+            "Flat",
+            
+            faiss.METRIC_INNER_PRODUCT # This appears to be slower -- why? And can we get away w/ L2 at inference time?
         )
         self.cpu_index.train(self.weights)
         self.cpu_index.add(self.weights)
@@ -131,7 +143,7 @@ if __name__ == "__main__":
             dataset=torch.utils.data.TensorDataset(X, y),
             shuffle=False,
             batch_size=args.batch_size,
-            pin_memory=False
+            pin_memory=True
         ))
     }
     
@@ -149,7 +161,6 @@ if __name__ == "__main__":
         npartitions=args.npartitions,
     ).to(torch.device('cuda'))
     model.verbose = args.verbose
-    # print(model, file=sys.stderr)
     
     # Warmup
     print('warmup')
@@ -162,13 +173,13 @@ if __name__ == "__main__":
     # Approximate
     t = time()
     model.exact = False
-    preds, _ = model.predict(dataloaders, mode='valid', dummy=True)
+    benchmark_predict(model, dataloaders, mode='valid', dummy=True)
     approx_time = time() - t
     
     # Exact
     t = time()
     model.exact = True
-    preds, _ = model.predict(dataloaders, mode='valid', dummy=True)
+    benchmark_predict(model, dataloaders, mode='valid', dummy=True)
     exact_time = time() - t
     
     print({
