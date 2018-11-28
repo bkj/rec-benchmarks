@@ -10,6 +10,7 @@ import argparse
 import numpy as np
 import pandas as pd
 from time import time
+from joblib import Parallel, delayed
 from collections import OrderedDict
 
 import torch
@@ -25,6 +26,28 @@ from torch.utils.data import Dataset, DataLoader
 
 # --
 # Helpers
+
+def precision(act, preds):
+    return len(act.intersection(preds)) / preds.shape[0]
+
+def __filter_and_rank(pred, X_filter, k=10):
+    for i in range(pred.shape[0]):
+        pred[i][X_filter[i]] = -1
+    
+    return np.argsort(-pred, axis=-1)[:,:k]
+
+def fast_topk(preds, X_train, n_jobs=32):
+    offsets = np.cumsum([p.shape[0] for p in preds])
+    offsets -= preds[0].shape[0]
+    
+    jobs = [delayed(__filter_and_rank)(
+        to_numpy(pred),
+        to_numpy(X_train[offset:(offset + pred.shape[0])])
+    ) for pred, offset in zip(preds, offsets)]
+    top_k = Parallel(n_jobs=n_jobs, backend='threading')(jobs)
+    top_k = np.vstack(top_k)
+    
+    return top_k
 
 class RaggedAutoencoderDataset(Dataset):
     def __init__(self, X, n_toks):
@@ -51,50 +74,58 @@ def pad_collate_fn(batch, pad_value=0):
     y = torch.stack(y, dim=0)
     return X, y
 
-
-class DestinyModel(BaseNet):
-    def __init__(self, n_toks, emb_dim, dropout, bias_offset):
-        
-        def _loss_fn(x, y):
-            return F.binary_cross_entropy_with_logits(x, y)
-        
-        super().__init__(loss_fn=_loss_fn)
+class EmbeddingSum(nn.Module):
+    def __init__(self, n_toks, emb_dim):
+        super().__init__()
         
         self.emb = nn.Embedding(n_toks, emb_dim, padding_idx=0)
         
-        self.dropout = dropout
-        
-        self.emb_bias   = nn.Parameter(torch.zeros(emb_dim))
-        self.bn1        = nn.BatchNorm1d(emb_dim)
-        self.hidden     = nn.Linear(emb_dim, emb_dim)
-        self.bn2        = nn.BatchNorm1d(emb_dim)
-        self.classifier = nn.Linear(emb_dim, n_toks)
+        self.emb_bias = nn.Parameter(torch.zeros(emb_dim))
         
         torch.nn.init.normal_(self.emb.weight.data, 0, 0.01)
         self.emb.weight.data[0] = 0
-        
-        torch.nn.init.normal_(self.hidden.weight.data, 0, 0.01)
-        self.hidden.bias.data.zero_()
-        
-        torch.nn.init.normal_(self.classifier.weight.data, 0, 0.01)
-        self.classifier.bias.data.zero_()
-        self.classifier.bias.data += bias_offset
     
     def forward(self, x):
-        x = self.emb(x).sum(dim=1) + self.emb_bias
-        x = self.bn1(F.relu(x))
-        x = F.dropout(x, p=self.dropout, training=self.training)
+        return self.emb(x).sum(dim=1) + self.emb_bias
+
+
+class DestinyLinear(nn.Module):
+    def __init__(self, in_channels, out_channels, bias_offset):
+        super().__init__()
         
-        x = self.hidden(x)
-        x = self.bn2(F.relu(x))
-        x = F.dropout(x, p=self.dropout, training=self.training)
+        self.linear = nn.Linear(in_channels, out_channels)
         
-        x = self.classifier(x)
+        torch.nn.init.normal_(self.linear.weight.data, 0, 0.01)
+        self.linear.bias.data.zero_()
+        self.linear.bias.data += bias_offset
+        
+    def forward(self, x):
+        return self.linear(x)
+
+
+class DestinyModel(BaseNet):
+    def __init__(self, n_toks, emb_dim, dropout, bias_offset):
+        super().__init__(loss_fn=F.binary_cross_entropy_with_logits)
+        
+        self.emb = EmbeddingSum(n_toks, emb_dim)
+        self.layers = nn.Sequential(
+            nn.ReLU(),
+            nn.BatchNorm1d(emb_dim),
+            nn.Dropout(dropout),
+            
+            DestinyLinear(emb_dim, emb_dim, bias_offset=0),
+            
+            nn.ReLU(),
+            nn.BatchNorm1d(emb_dim),
+            nn.Dropout(dropout),
+        )
+        self.output = DestinyLinear(emb_dim, n_toks, bias_offset=bias_offset)
+    
+    def forward(self, x):
+        x = self.emb(x)
+        x = self.layers(x)
+        x = self.output(x)
         return x
-
-
-def precision(act, preds):
-    return len(act.intersection(preds)) / preds.shape[0]
 
 # --
 # Run
@@ -145,8 +176,6 @@ if __name__ == "__main__":
         print('loading cache', file=sys.stderr)
         X_train = np.load('.X_train_cache.npy')
         X_test = np.load('.X_test_cache.npy')
-        print('X_train.shape=%s' % str(X_train.shape))
-        print('X_test.shape=%s' % str(X_test.shape))
     
     n_toks = max([max(x) for x in X_train]) + 1
     X_test = [set(x) for x in X_test]
@@ -183,14 +212,9 @@ if __name__ == "__main__":
     model.verbose = not args.no_verbose
     print(model, file=sys.stderr)
     
-    # lr_scheduler = HPSchedule.linear_cycle(hp_max=args.lr, epochs=args.epochs, low_hp=0.0, extra=0)
-    
     model.init_optimizer(
         opt=torch.optim.Adam,
         params=model.parameters(),
-        # hp_scheduler={
-        #     "lr" : lr_scheduler,
-        # }
         lr=args.lr,
     )
     
@@ -199,12 +223,8 @@ if __name__ == "__main__":
         train_hist = model.train_epoch(dataloaders, mode='train', compute_acc=False)
         
         if epoch % args.eval_interval == 0:
-            preds, _ = model.predict(dataloaders, mode='valid')
-            
-            for i in range(preds.shape[0]):
-                preds[i][X_train[i]] = -1
-            
-            top_k = to_numpy(preds.topk(k=10, dim=-1)[1])
+            preds, _ = model.predict(dataloaders, mode='valid', no_cat=True)
+            top_k = fast_topk(preds, X_train)
             
             p_at_01 = np.mean([precision(X_test[i], top_k[i][:1]) for i in range(len(X_test))])
             p_at_05 = np.mean([precision(X_test[i], top_k[i][:5]) for i in range(len(X_test))])
