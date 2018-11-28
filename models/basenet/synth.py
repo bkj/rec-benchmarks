@@ -122,6 +122,7 @@ if __name__ == "__main__":
     # --
     # Generate some data
     
+    print('make data', file=sys.stderr)
     X = np.random.choice(args.n_toks, (args.n_batches * args.batch_size, args.seq_len))
     X = torch.LongTensor(X)
     y = torch.zeros(X.shape[0])
@@ -137,6 +138,7 @@ if __name__ == "__main__":
     # --
     # Model
     
+    print('make model', file=sys.stderr)
     model = Model(
         n_toks=args.n_toks,
         emb_dim=args.emb_dim,
@@ -150,6 +152,7 @@ if __name__ == "__main__":
     # print(model, file=sys.stderr)
     
     # Warmup
+    print('warmup')
     model.exact = True;  _ = model(dataloaders['valid'][0][0].cuda())
     model.exact = False; _ = model(dataloaders['valid'][0][0].cuda())
     
@@ -159,13 +162,13 @@ if __name__ == "__main__":
     # Approximate
     t = time()
     model.exact = False
-    preds, _ = model.predict(dataloaders, mode='valid')
+    preds, _ = model.predict(dataloaders, mode='valid', dummy=True)
     approx_time = time() - t
     
     # Exact
     t = time()
     model.exact = True
-    preds, _ = model.predict(dataloaders, mode='valid')
+    preds, _ = model.predict(dataloaders, mode='valid', dummy=True)
     exact_time = time() - t
     
     print({

@@ -30,22 +30,20 @@ if __name__ == "__main__":
     edges = pd.read_csv(args.inpath, header=None, sep='\t')
     edges.columns = ['userId', 'movieId', 'movieRating']
     
+    u_counts = edges.userId.value_counts()
+    keep     = u_counts.index[u_counts >= 10]
+    edges    = edges[edges.userId.isin(keep)]
+    
     edges.userId      = pd.Categorical(edges.userId).codes
     edges.movieId     = pd.Categorical(edges.movieId).codes
     edges.movieRating = 1
     
     train, test = train_test_split(edges, train_size=0.8, stratify=edges.userId)
+    assert len(set(train.userId)) == len(set(test.userId))
     
     train = train.sort_values(['userId', 'movieId']).reset_index(drop=True)
     test  = test.sort_values(['userId', 'movieId']).reset_index(drop=True)
     
-    train_users = set(train.userId)
-    test_users  = set(test.userId)
-    
-    no_train = test_users.difference(train_users)
-    if len(no_train):
-        sel = test.userId.isin(no_train)
-        test = test[~sel]
-    
-    train.to_csv(os.path.join(args.outpath, 'edgelist-train.tsv'), sep='\t', header=None)
-    test.to_csv(os.path.join(args.outpath, 'edgelist-test.tsv'), sep='\t', header=None)
+    train.to_csv(os.path.join(args.outpath, 'edgelist-train.tsv'), sep='\t', header=None, index=False)
+    test.to_csv(os.path.join(args.outpath, 'edgelist-test.tsv'), sep='\t', header=None, index=False)
+
