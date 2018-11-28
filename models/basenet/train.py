@@ -77,27 +77,16 @@ def pad_collate_fn(batch, pad_value=0):
 # Model definition
 
 class EmbeddingSum(nn.Module):
-    def __init__(self, n_toks, emb_dim, bag=False):
+    def __init__(self, n_toks, emb_dim):
         super().__init__()
-        
-        self._bag = bag # !! Faster at inference time, waay slower at training
-        
         self.emb     = nn.Embedding(n_toks, emb_dim, padding_idx=0)
-        self.emb_bag = nn.EmbeddingBag(n_toks, emb_dim, mode='sum') 
-        
         self.emb_bias = nn.Parameter(torch.zeros(emb_dim))
         
         torch.nn.init.normal_(self.emb.weight.data, 0, 0.01) # !! Slows down approx. _a lot_ (at high dimensions?)
         self.emb.weight.data[0] = 0
-    
-    def set_bag(self, val):
-        self._bag = val
-        if val:
-            emb_weights = self.emb.weight.data.clone()
-            self.emb_bag.weight.data.set_(emb_weights)
-    
+        
     def forward(self, x):
-        out = self.emb(x).sum(dim=1) if not self._bag else self.emb_bag(x) 
+        out = self.emb(x).sum(dim=1)
         out = out + self.emb_bias
         return out
 

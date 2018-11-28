@@ -137,24 +137,23 @@ class ApproxLinear(nn.Module):
 
 
 class EmbeddingSum(nn.Module):
-    def __init__(self, n_toks, emb_dim, bag=False):
+    def __init__(self, n_toks, emb_dim):
         super().__init__()
         
-        self._bag = bag # !! Faster at inference time, waay slower at training
-        
-        self.emb     = nn.Embedding(n_toks, emb_dim, padding_idx=0)
-        self.emb_bag = nn.EmbeddingBag(n_toks, emb_dim, mode='sum') 
-        
+        self.emb = nn.Embedding(n_toks, emb_dim, padding_idx=0)
         self.emb_bias = nn.Parameter(torch.zeros(emb_dim))
         
-        torch.nn.init.normal_(self.emb.weight.data, 0, 0.01) # !! Slows down approx. _a lot_ (at high dimensions?)
-        self.emb.weight.data[0] = 0
+        # torch.nn.init.normal_(self.emb.weight.data, 0, 0.01) # !! Slows down approx. _a lot_ (at high dimensions?)
+        # self.emb.weight.data[0] = 0
+        
+        self._bag = False # !! Faster at inference time, waay slower at training
     
     def set_bag(self, val):
         self._bag = val
         if val:
-            emb_weights = self.emb.weight.data.clone()
-            self.emb_bag.weight.data.set_(emb_weights)
+            self.emb_bag = nn.EmbeddingBag(n_toks, emb_dim, mode='sum') 
+            self.emb_bag.weight.data.set_(self.emb.weight.data.clone())
+            del self.emb
     
     def forward(self, x):
         out = self.emb(x).sum(dim=1) if not self._bag else self.emb_bag(x) 
@@ -165,9 +164,9 @@ class EmbeddingSum(nn.Module):
 class DestinyLinear(nn.Linear):
     def __init__(self, in_channels, out_channels, bias_offset=0.0):
         super().__init__(in_channels, out_channels, bias=True) # !! bias not handled by approx yet
-        torch.nn.init.normal_(self.weight.data, 0, 0.01)
-        self.bias.data.zero_()        # !!
-        self.bias.data += bias_offset # !!
+        # torch.nn.init.normal_(self.weight.data, 0, 0.01)
+        # self.bias.data.zero_()        # !!
+        # self.bias.data += bias_offset # !!
 
 
 class DestinyInferenceModel(BaseNet):
@@ -247,7 +246,7 @@ if __name__ == "__main__":
             dataset=RaggedAutoencoderDataset(X=X_train, n_toks=n_toks),
             batch_size=args.batch_size,
             collate_fn=pad_collate_fn,
-            num_workers=8,
+            num_workers=2,
             pin_memory=False,
             shuffle=False,
         ))
