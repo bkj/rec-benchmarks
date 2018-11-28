@@ -4,25 +4,20 @@
     train.py
 """
 
-import os
 import sys
 import json
 import argparse
 import numpy as np
 import pandas as pd
 from time import time
-from tqdm import tqdm
-from collections import OrderedDict
 from joblib import Parallel, delayed
 
-import faiss
 import torch
 from torch import nn
 from torch.nn import functional as F
-from torch.autograd import Variable
 
 from basenet import BaseNet, HPSchedule
-from basenet.helpers import to_numpy, to_device, set_seeds
+from basenet.helpers import to_numpy, set_seeds
 
 from torch.utils.data import Dataset, DataLoader
 
@@ -51,6 +46,9 @@ def fast_topk(preds, X_train, n_jobs=32):
     
     return top_k
 
+# --
+# Data utilities
+
 class RaggedAutoencoderDataset(Dataset):
     def __init__(self, X, n_toks):
         self.X = [torch.LongTensor(xx) for xx in X]
@@ -65,7 +63,6 @@ class RaggedAutoencoderDataset(Dataset):
     def __len__(self):
         return len(self.X)
 
-
 def pad_collate_fn(batch, pad_value=0):
     X, y = zip(*batch)
     
@@ -76,7 +73,8 @@ def pad_collate_fn(batch, pad_value=0):
     y = torch.stack(y, dim=0)
     return X, y
 
-
+# --
+# Model definition
 
 class EmbeddingSum(nn.Module):
     def __init__(self, n_toks, emb_dim, bag=False):
@@ -95,15 +93,12 @@ class EmbeddingSum(nn.Module):
     def set_bag(self, val):
         self._bag = val
         if val:
-            self.emb_bag.weight.data.set_(self.emb.weight.data.clone())
+            emb_weights = self.emb.weight.data.clone()
+            self.emb_bag.weight.data.set_(emb_weights)
     
     def forward(self, x):
-        
-        if not self._bag:
-            out = self.emb(x).sum(dim=1) + self.emb_bias
-        else:
-            out = self.emb_bag(x) + self.emb_bias
-        
+        out = self.emb(x).sum(dim=1) if not self._bag else self.emb_bag(x) 
+        out = out + self.emb_bias
         return out
 
 
@@ -228,31 +223,30 @@ if __name__ == "__main__":
     
     model.init_optimizer(opt=torch.optim.Adam, params=model.parameters(), lr=args.lr)
     
-    # Will make validation run faster
+    # Could make validation run faster
     # print('preloading dataloaders["valid"] + warming up', file=sys.stderr)
     # dataloaders['valid'] = list(dataloaders['valid'])
     
+    print('warm', file=sys.stderr)
     _ = model(next(iter(dataloaders['valid']))[0].cuda())
     
     t = time()
     for epoch in range(args.epochs):
-        
-        train_hist = model.train_epoch(dataloaders, mode='train')
+        train_hist = model.train_epoch(dataloaders, mode='train', compute_acc=False)
         
         if epoch % args.eval_interval == 0:
-            preds, _ = model.predict(dataloaders, mode='valid', no_cat=True) # no_cat=False if using `slow_topk`
+            preds, _ = model.predict(dataloaders, mode='valid', no_cat=True)
             top_k = fast_topk(preds, X_train)
             
             p_at_01 = np.mean([precision(X_test[i], top_k[i][:1]) for i in range(len(X_test))])
             p_at_05 = np.mean([precision(X_test[i], top_k[i][:5]) for i in range(len(X_test))])
             p_at_10 = np.mean([precision(X_test[i], top_k[i][:10]) for i in range(len(X_test))])
-            
             print(json.dumps({
-                "epoch"   : epoch,
-                "p_at_01" : p_at_01,
-                "p_at_05" : p_at_05,
-                "p_at_10" : p_at_10,
-                "elapsed" : time() - t,
+                "epoch":   epoch,
+                "p_at_01": p_at_01,
+                "p_at_05": p_at_05,
+                "p_at_10": p_at_10,
+                "elapsed": time() - t,
             }))
     
     model.save('%s.pt' % args.cache_path)
