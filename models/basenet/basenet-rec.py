@@ -212,8 +212,9 @@ npartitions      = 8192
 def parse_args():
     parser = argparse.ArgumentParser()
     
-    parser.add_argument('--train-path', type=str, default='../../data/edgelist-train.tsv')
-    parser.add_argument('--test-path', type=str, default='../../data/edgelist-test.tsv')
+    parser.add_argument('--train-path', type=str, default='../../data/ml-20m/edgelist-train.tsv')
+    parser.add_argument('--test-path', type=str, default='../../data/ml-20m/edgelist-test.tsv')
+    parser.add_argument('--cache-path', type=str, required=True)
     
     parser.add_argument('--batch-size', type=int, default=2048)
     parser.add_argument('--emb-dim', type=int, default=128)
@@ -222,10 +223,11 @@ def parse_args():
     parser.add_argument('--lr', type=float, default=0.01)
     parser.add_argument('--bias-offset', type=float, default=-10)
     parser.add_argument('--dropout', type=float, default=0.5)
-    parser.add_argument('--no-cache', action="store_true")
     parser.add_argument('--eval-interval', type=int, default=1)
     parser.add_argument('--no-verbose', action="store_true")
     parser.add_argument('--seed', type=int, default=456)
+    
+    parser.add_argument('--no-cache', action="store_true")
     
     return parser.parse_args()
 
@@ -249,12 +251,12 @@ if __name__ == "__main__":
         X_train, X_test = X_train[o], X_test[o]
         
         print('saving cache', file=sys.stderr)
-        np.save('.X_train_cache.npy', X_train)
-        np.save('.X_test_cache.npy', X_test)
+        np.save('%s_train.npy' % args.cache_path, X_train)
+        np.save('%s_test.npy' % args.cache_path, X_test)
     else:
         print('loading cache', file=sys.stderr)
-        X_train = np.load('.X_train_cache.npy')
-        X_test  = np.load('.X_test_cache.npy')
+        X_train = np.load('%s_train.npy' % args.cache_path)
+        X_test  = np.load('%s_test.npy' % args.cache_path)
     
     n_toks = max([max(x) for x in X_train]) + 1
     X_test = [set(x) for x in X_test]

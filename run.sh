@@ -20,7 +20,12 @@ conda install -c maciejkula -c pytorch spotlight=0.1.5 -y
 # --
 # IO
 
+# Movielens
 wget http://files.grouplens.org/datasets/movielens/ml-20m.zip
 unzip ml-20m.zip && mv ml-20m data && rm ml-20m.zip
+python prep_ml.py --inpath data/ml-20m/ratings.csv --outpath data/ml-20m
 
-python prep.py --inpath data/ml-20m/ratings.csv --outpath data
+# Netflix
+# wget from HIVE server
+
+python prep_netflix.py --inpath data/netflix/netflix.tsv --outpath data/netflix

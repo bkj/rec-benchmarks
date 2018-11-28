@@ -17,7 +17,7 @@ from sklearn.model_selection import train_test_split
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--inpath', type=str, default='data/ml-20m/ratings.csv')
-    parser.add_argument('--outpath', type=str, default='data')
+    parser.add_argument('--outpath', type=str, default='data/ml-20m')
     parser.add_argument('--seed', type=int, default=123)
     return parser.parse_args()
 

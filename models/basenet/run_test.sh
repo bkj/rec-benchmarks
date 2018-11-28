@@ -51,3 +51,16 @@ CUDA_VISIBLE_DEVICES=7 python basenet-rec.py --emb-dim 800
 # exact=False 22.021682739257812 # !!
 # exact=True 9.221946954727173
 
+# --
+# Netflix simulation
+
+python synth.py --out-dim 480189 --n-toks 17770 --emb-dim 128
+# {'exact_time': 2.8564934730529785, 'approx_time': 0.8344957828521729, 'approx_speedup': 3.4230172659350555}
+
+python synth.py --out-dim 480189 --n-toks 17770 --emb-dim 512
+# {'exact_time': 10.347851276397705, 'approx_time': 1.3666396141052246, 'approx_speedup': 7.571748374331092}
+
+# --
+
+
+
