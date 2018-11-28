@@ -33,8 +33,8 @@ def precision(act, preds):
     return len(act.intersection(preds)) / preds.shape[0]
 
 def __filter_and_rank(pred, X_filter, k=10):
-    # for i in range(pred.shape[0]):
-    #     pred[i][X_filter[i]] = -1
+    for i in range(pred.shape[0]):
+        pred[i][X_filter[i]] = -1
     
     return np.argsort(-pred, axis=-1)[:,:k]
 
@@ -202,7 +202,7 @@ if __name__ == "__main__":
             dataset=RaggedAutoencoderDataset(X=X_train, n_toks=n_toks),
             batch_size=args.batch_size,
             collate_fn=pad_collate_fn,
-            num_workers=4,
+            num_workers=2,
             pin_memory=True,
             shuffle=True,
         ),
@@ -210,7 +210,7 @@ if __name__ == "__main__":
             dataset=RaggedAutoencoderDataset(X=X_train, n_toks=n_toks),
             batch_size=args.batch_size,
             collate_fn=pad_collate_fn,
-            num_workers=4,
+            num_workers=2,
             pin_memory=False,
             shuffle=False,
         )
@@ -226,11 +226,9 @@ if __name__ == "__main__":
     model.verbose = not args.no_verbose
     print(model, file=sys.stderr)
     
-    model.init_optimizer(
-        opt=torch.optim.Adam,
-        params=model.parameters(),
-    )
+    model.init_optimizer(opt=torch.optim.Adam, params=model.parameters(), lr=args.lr)
     
+    # Will make validation run faster
     # print('preloading dataloaders["valid"] + warming up', file=sys.stderr)
     # dataloaders['valid'] = list(dataloaders['valid'])
     
