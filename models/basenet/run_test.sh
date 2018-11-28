@@ -69,6 +69,9 @@ python synth.py --out-dim 480189 --n-toks 17770 --emb-dim 512
 #     --cache-path ./cache/netflix
 
 python train.py --cache-path ./cache/ml20 --epochs 1
-python inference.py --cache-path ./cache/ml20
+python inference.py --cache-path ./cache/ml20 --benchmark
 
+# python train.py --cache-path ./cache/netflix --epochs 1 --batch-size 16 --emb-dim 128
+python inference.py --cache-path ./cache/netflix --benchmark --emb-dim 256
+# Speedup is less than in synthetic case, possibly due to batch sizes.  Should deconflict.
 

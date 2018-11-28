@@ -28,16 +28,23 @@ from torch.utils.data import Dataset, DataLoader
 
 def benchmark_predict(model, dataloaders, mode='val'):
     _ = model.eval()
+    
+    _ = model(dataloaders[mode][0][0].cuda())
+    torch.cuda.synchronize()
+    
     gen = dataloaders[mode]
     if model.verbose:
         gen = tqdm(gen)
     
+    t = time()
     for data, _ in gen:
         with torch.no_grad():
             data = data.cuda(async=True)
             out  = model(data)
     
     torch.cuda.synchronize()
+    
+    return time() - t
 
 
 def precision(act, preds):
@@ -102,7 +109,6 @@ class ApproxLinear(nn.Module):
         self.cpu_index = faiss.index_factory(
             self.weights.shape[1],
             f"IVF{npartitions},Flat",
-            # "Flat", # For testing
             faiss.METRIC_INNER_PRODUCT # This appears to be slower -- why? And can we get away w/ L2 at inference time?
         )
         self.cpu_index.train(self.weights)
@@ -181,8 +187,7 @@ class DestinyInferenceModel(BaseNet):
             nn.Dropout(0.0),
         )
         
-        # self.linear = DestinyLinear(emb_dim, n_toks)
-        self.linear = DestinyLinear(emb_dim, 400000)
+        self.linear = DestinyLinear(emb_dim, n_toks)
         
         self.approx_linear = None # Init later
         self.exact         = True
@@ -242,12 +247,11 @@ if __name__ == "__main__":
             dataset=RaggedAutoencoderDataset(X=X_train, n_toks=n_toks),
             batch_size=args.batch_size,
             collate_fn=pad_collate_fn,
-            num_workers=2,
+            num_workers=8,
             pin_memory=False,
             shuffle=False,
         ))
     }
-    warm_batch = dataloaders['valid'][0][0]
     
     # --
     # Define model
@@ -257,12 +261,13 @@ if __name__ == "__main__":
         n_toks=n_toks,
         emb_dim=args.emb_dim,
     )
-    # model.load('%s.pt' % args.cache_path)
+    model.load('%s.pt' % args.cache_path)
     model = model.to(torch.device('cuda'))
     model.eval()
     model.verbose = not args.no_verbose
     print(model, file=sys.stderr)
     
+    print('set_bag + init_ann', file=sys.stderr)
     model.emb.set_bag(True) # Convert EmbeddingLayer to EmbeddingBag
     model.init_ann(args.topk, args.batch_size, args.nprobe, args.npartitions)
     
@@ -270,29 +275,21 @@ if __name__ == "__main__":
     # Run
     
     torch.cuda.synchronize()
+    print('run', file=sys.stderr)
     if args.benchmark:
         
         # Exact
         model.exact = True
-        _ = model(warm_batch.cuda())
-        torch.cuda.synchronize()
-        
-        t = time()
-        benchmark_predict(model, dataloaders, mode='valid')
-        exact_time = time() - t
+        exact_time = benchmark_predict(model, dataloaders, mode='valid')
         
         # Approximate
         model.exact = False
-        _ = model(warm_batch.cuda())
-        torch.cuda.synchronize()
-        
-        t = time()
-        benchmark_predict(model, dataloaders, mode='valid')
-        approx_time = time() - t
+        approx_time = benchmark_predict(model, dataloaders, mode='valid')
         
         print(json.dumps({
-            "exact_time"  : exact_time,
-            "approx_time" : approx_time,
+            "exact_time"     : exact_time,
+            "approx_time"    : approx_time,
+            "approx_speedup" : exact_time / approx_time
         }))
     else:
         

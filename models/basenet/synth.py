@@ -51,8 +51,8 @@ class ApproxLinear(nn.Module):
         
         self.cpu_index = faiss.index_factory(
             self.weights.shape[1],
-            # f"IVF{npartitions},Flat",
-            "Flat",
+            f"IVF{npartitions},Flat",
+            # "Flat",
             
             faiss.METRIC_INNER_PRODUCT # This appears to be slower -- why? And can we get away w/ L2 at inference time?
         )
@@ -134,7 +134,7 @@ if __name__ == "__main__":
     # --
     # Generate some data
     
-    print('make data', file=sys.stderr)
+    print('define dataloaders', file=sys.stderr)
     X = np.random.choice(args.n_toks, (args.n_batches * args.batch_size, args.seq_len))
     X = torch.LongTensor(X)
     y = torch.zeros(X.shape[0])
@@ -150,7 +150,7 @@ if __name__ == "__main__":
     # --
     # Model
     
-    print('make model', file=sys.stderr)
+    print('define model', file=sys.stderr)
     model = Model(
         n_toks=args.n_toks,
         emb_dim=args.emb_dim,
@@ -163,7 +163,6 @@ if __name__ == "__main__":
     model.verbose = args.verbose
     
     # Warmup
-    print('warmup')
     model.exact = True;  _ = model(dataloaders['valid'][0][0].cuda())
     model.exact = False; _ = model(dataloaders['valid'][0][0].cuda())
     

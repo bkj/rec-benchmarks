@@ -228,7 +228,6 @@ if __name__ == "__main__":
     # print('preloading dataloaders["valid"] + warming up', file=sys.stderr)
     # dataloaders['valid'] = list(dataloaders['valid'])
     
-    print('warm', file=sys.stderr)
     _ = model(next(iter(dataloaders['valid']))[0].cuda())
     
     t = time()
